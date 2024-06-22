@@ -1,9 +1,10 @@
 import pandas as pd
 import numpy as np
 import random
+import os
 import torch
 import torch.nn as nn
-import torch.functional as F
+import torch.nn.functional as F
 from tqdm.auto import tqdm
 
 
@@ -40,10 +41,8 @@ class PhytoPredictor(nn.Module):
     torch.Size([1, 1])  # Example output shape, depends on output_size
     """
 
-    def __init__(self, input_size_phyto, lstm_hidden_size, input_size_abio, ffnn_hidden_size, output_size, p_drop, bidirectional=True):
+    def __init__(self, input_size_phyto, lstm_hidden_size, input_size_abio, ffnn_hidden_size, output_size, p_drop=0.5, bidirectional=True):
         super(PhytoPredictor, self).__init__()
-
-        self.bidirectional = bidirectional
 
         # setting up the (Bi)LSTM for the phytoplankton data, input size will probably be the same as the hidden size
         self.history_encoder = nn.LSTM(
@@ -83,7 +82,7 @@ class PhytoPredictor(nn.Module):
         logits = self._predict_logits(abio_data, phyto_input)
 
         # after acquiring the logits from the model, we use a ReLU activation function to hopefully get results
-        output = F.ReLu(logits)
+        output = F.relu(logits)
 
         return output
     
@@ -156,7 +155,7 @@ class PhytoPredictor(nn.Module):
         Returns:
         torch.Tensor: Logits tensor before activation of shape (batch_size, output_size).
         """
-        
+
         # pretty sure we should be using hx, but we can use the others if I am wrong
         u, (hx, cx) = self.history_encoder(phyto_input)
         
@@ -164,7 +163,7 @@ class PhytoPredictor(nn.Module):
         encoded_history = hx.reshape(-1)
 
         # we concatenate the (Bi)LSTM output with the abio input
-        combined_input = torch.cat((encoded_history, abio_input), dim=1)
+        combined_input = torch.cat((encoded_history, abio_input), dim=0)
         
         # then we will put this input through the FFNN to hopefully get some results
         logits_output = self.FFNN(combined_input)
@@ -231,14 +230,21 @@ def predict(model, data, loss_metric="MSE", calc_loss=False):
     return concentrations
 
 
-def train_neural_model(
+def train_phytopredictor(
     model, 
     optimiser,
     data,
     trial_name,
+    abio_columns,
+    phyto_columns,
+    shuffled_rows=True,
+    random_seed=None,
+    train_ratio=0.7,
+    minimum_lookback=10,
+    lookback=-1,
     loss_metric="MSE",
     epochs=5, 
-    check_every=10):
+    check_interval=10):
     """
     Trains a neural network model using the specified optimizer on the provided data, monitoring training progress
     and saving the best model based on evaluation loss.
@@ -248,6 +254,15 @@ def train_neural_model(
     optimiser (torch.optim.Optimizer): The optimizer used for training the model.
     data (pd.DataFrame): The input data containing both abiotic and phytoplankton data.
     trial_name (str): Name of the trial or model being trained, used for saving the best model checkpoint.
+    abio_columns (list): List of column names corresponding to abiotic data in the dataframe.
+    phyto_columns (list): List of column names corresponding to phytoplankton data in the dataframe.
+    shuffled_rows (bool, optional): Whether to shuffle the rows of the dataset before splitting. Defaults to True.
+    random_seed (int or None, optional): Random seed for reproducibility. Defaults to None.
+    train_ratio (float, optional): Ratio of data to use for training, the remainder is used for evaluation. Defaults to 0.7.
+    minimum_lookback (int, optional): Minimum number of previous time steps to consider in the phytoplankton data for LSTM. Defaults to 10.
+    lookback (int, optional): Number of previous time steps to consider in the phytoplankton data for LSTM. Defaults to -1 (all).
+    loss_metric (str, optional): The loss metric used for optimization. Defaults to "MSE".
+                                 Supported metrics: "MSE", "MAE", "Huber", "CosSim".
     epochs (int, optional): Number of epochs (iterations over the entire dataset) for training. Defaults to 5.
     check_every (int, optional): Frequency of evaluation checks (in number of steps) to save the best model based on evaluation loss. Defaults to 10.
 
@@ -259,10 +274,10 @@ def train_neural_model(
 
     Notes:
     - The function splits the input data into training and evaluation sets using the data_splitter function.
-    - It initializes logs for training and evaluation losses.
-    - During training, it updates the model parameters based on backpropagation of loss computed using the model's loss function.
-    - The best model checkpoint (lowest evaluation loss) is saved periodically based on check_every parameter.
-    - After training, the function evaluates the model one last time on the evaluation set and records the final evaluation loss.
+    - Initializes logs for training and evaluation losses.
+    - During training, updates the model parameters based on backpropagation of loss computed using the model's loss function.
+    - Saves the best model checkpoint (lowest evaluation loss) periodically based on check_every parameter.
+    - After training, evaluates the model one last time on the evaluation set and records the final evaluation loss.
     - Training progress is visualized using a tqdm progress bar.
     - The trained model, training loss log, and evaluation loss log are returned as outputs.
 
@@ -273,16 +288,23 @@ def train_neural_model(
     >>> trial_name = "trial_1"
     >>> trained_model, train_losses, eval_losses = train_neural_model(model, optimiser, data, trial_name, epochs=10)
     """
+
+    # checking whether the directory for the optimal model parameters exists
+    if not os.path.exists("models"):
+
+        # and if not, we just create it
+        os.makedirs("models")
     
     # splitting the data for a single location into a training and evaluation split
-    training_split, evaluation_split = data_splitter(data)
+    training_split, evaluation_split = data_splitter(data, abio_columns, phyto_columns, shuffled_rows, random_seed, train_ratio, minimum_lookback, lookback)
 
     # initializing the logs for the loss of both the training and evaluation set
     training_loss_log = []
     evaluation_loss_log = []
 
     # we do a first pass of the evaluation set and calculate the current loss (as a base thingy)
-    _, eval_loss = model.predict(
+    _, eval_loss = predict(
+        model,
         evaluation_split,
         loss_metric,
         calc_loss=True
@@ -328,10 +350,11 @@ def train_neural_model(
                 training_loss_log.append(loss)
 
                 # every so often we check whether the model has improved or not (so we can save the best version)
-                if step % check_every == 0: 
+                if step % check_interval == 0: 
 
                     # we do a first pass of the evaluation set and calculate the current loss (as a base thingy)
-                    _, eval_loss = model.predict(
+                    _, eval_loss = predict(
+                        model,
                         evaluation_split,
                         loss_metric,
                         calc_loss=True
@@ -347,7 +370,8 @@ def train_neural_model(
                 step += 1
 
     # once we are done with training we evaluate one last time
-    _, eval_loss = model.predict(
+    _, eval_loss = predict(
+        model,
         evaluation_split,
         loss_metric,
         calc_loss=True
@@ -359,7 +383,7 @@ def train_neural_model(
     return model, training_loss_log, evaluation_loss_log
 
 
-def data_splitter(data, abio_columns, phyto_columns, shuffled_rows=True, random_seed=None, train_ratio=0.7, lookback=-1):
+def data_splitter(data, abio_columns, phyto_columns, shuffled_rows=True, random_seed=None, train_ratio=0.7, minimum_lookback=10, lookback=-1):
     """
     Splits the input data into training and evaluation sets for machine learning tasks involving abiotic and phytoplankton data.
 
@@ -370,6 +394,7 @@ def data_splitter(data, abio_columns, phyto_columns, shuffled_rows=True, random_
     shuffled_rows (bool, optional): Whether to shuffle the rows of the dataset before splitting. Defaults to True.
     random_seed (int, optional): Random seed for reproducibility. Defaults to None.
     train_ratio (float, optional): Ratio of data to use for training (between 0 and 1). Defaults to 0.7.
+    minimum_lookback (int, optional): Minimum number of previous time steps to consider in the phytoplankton data for LSTM. Defaults to 10.
     lookback (int, optional): Number of previous time steps to consider for each sample. Defaults to -1 (uses all previous data).
 
     Returns:
@@ -404,7 +429,7 @@ def data_splitter(data, abio_columns, phyto_columns, shuffled_rows=True, random_
     (2, 2)
     """
 
-    indices_list = list(range(len(data)))
+    indices_list = list(range(minimum_lookback, len(data)))
 
     # initializing the random seed in case we want to compare runs with different settings
     if random_seed is not None:
@@ -413,14 +438,6 @@ def data_splitter(data, abio_columns, phyto_columns, shuffled_rows=True, random_
     # shuffling the indices so we get splits that have intermixed indices
     if shuffled_rows:
         random.shuffle(indices_list)
-
-    # assert some important columns are present (currently just Datum but maybe future rewrite for handling all locations at the same time)
-    loc_date_columns = ["DATUM"]
-
-    for column in loc_date_columns:
-        if column not in data.columns:
-            print(f"The expected column {column} is not present in the given dataset, while it is required")
-            return
 
     train_row_count = int(train_ratio * len(data))
 
@@ -436,8 +453,8 @@ def data_splitter(data, abio_columns, phyto_columns, shuffled_rows=True, random_
         for index in index_split:
 
             # first grabbing the abiotic data and the actual phytoplankton concentrations at the timestamp and location
-            abio_data = data.loc(index, abio_columns).to_numpy()
-            phyto_concentration = data.loc(index, phyto_columns).to_numpy()
+            abio_data = torch.tensor(data.loc[index, abio_columns].to_numpy(), dtype=torch.float32)
+            phyto_concentration = torch.tensor(data.loc[index, phyto_columns].to_numpy(), dtype=torch.float32)
 
             # if no lookback has been decided, the lstm will use all previous data
             if lookback < 0:
@@ -449,7 +466,7 @@ def data_splitter(data, abio_columns, phyto_columns, shuffled_rows=True, random_
                 start_index = max(0, index - lookback)
 
             # creating the phytoplankton history matrix
-            phyto_data = data.loc[start_index:index - 1, phyto_columns].to_numpy()
+            phyto_data = torch.tensor(data.loc[start_index:index - 1, phyto_columns].to_numpy(), dtype=torch.float32)
 
             # lastly we add the processed data to the data lists
             data_list.append(((abio_data, phyto_data), phyto_concentration))
@@ -529,18 +546,8 @@ def aggregate_phyto_data(data, clustered_phyto_types, keep_original_columns=Fals
     # dropping the columns
     phyto_columns = {phyto_type for cluster in clustered_phyto_types for phyto_type in cluster}
 
-    return data.drop(phyto_columns, axis=1)
+    return data.drop(phyto_columns, axis=1), labels
 
 
 if __name__ == "__main__":
-
-    # splitting the phytoplankton randomly
-    # random_split = np.split(np.asarray(phyto_columns), 5)
-
-    df = pd.read_excel('../../data/MERGED_DATA_180624.xlsx', sheet_name='MERGE_FINAL')
-
-    columns = list(df.columns)
-
-    non_phyto_columns = ['TIJD', 'ZS [mg/l]', 'ZICHT [dm]', 'T [oC]', 'SiO2 [umol/L]', 'SALNTT [DIMSLS]', 'PO4 [umol/L]', 'pH [DIMSLS]', 'NO3 [umol/L]', 'NO2 [umol/L]', 'NH4 [umol/L]', 'E [/m]', 'E_method', 'CHLFa [ug/l]', '    Q', 'PAR [J/m2d]', 'PAR [kJ/m2d]', 'kPAR_7d', 'kPAR_14d', 'DIN', 'DIN:SRP', 'DIN:SI', 'SRP:SI', 'IM [Jm2d]', 'interpolated_columns']
-
-    loc_date_columns = ["LOC_CODE", "DATUM"]
+    pass
