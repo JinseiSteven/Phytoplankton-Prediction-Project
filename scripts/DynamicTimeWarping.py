@@ -145,17 +145,6 @@ class DynamicTimeWarping:
         return path
 
 
-class TimeSeriesKmeans:
-    def __init__(self):
-        pass
-
-    def train(self):
-        pass
-    
-    def predict(self):
-        pass
-
-
 def plot_inertia(input, nr_clusters_limit):
     inertia_list = []
 
