@@ -87,14 +87,62 @@ class PhytoPredictor(nn.Module):
 
         return output
     
-    def loss(self, input_data, expected_concentrations):
+    def loss(self, input_data, expected_concentrations, metric="MSE"):
         """
-        TODO TODO TODO TODO TODO TODO
+        Computes the loss between predicted and expected phytoplankton concentrations based on the chosen metric.
+
+        Parameters:
+        input_data (tuple of torch.Tensor): Tuple containing abiotic data tensor
+                                            (shape: [batch_size, input_size_abio]) and phytoplankton history matrix tensor
+                                            (shape: [batch_size, seq_len, input_size_phyto]).
+        expected_concentrations (torch.Tensor): Expected phytoplankton concentrations tensor
+                                                (shape: [batch_size, output_size]).
+        metric (str, optional): The loss metric to use. Defaults to "MSE".
+                                Supported metrics:
+                                    - "MSE": Mean Squared Error.
+                                    - "MAE": Mean Absolute Error.
+                                    - "Huber": Huber Loss.
+                                    - "CosSim": Cosine Similarity Loss.
+
+        Returns:
+        torch.Tensor: Computed loss tensor based on the selected metric.
+
+        Notes:
+        - The method uses the neural network to predict phytoplankton concentrations and calculates the loss based on the chosen metric.
+        - If an unsupported metric is provided, defaults to "MSE" and prints a message indicating the default choice.
+
+        Example:
+        >>> model = PhytoPredictor(input_size_phyto=10, lstm_hidden_size=64, input_size_abio=5, ffnn_hidden_size=32, output_size=1, p_drop=0.2)
+        >>> abio_data = torch.randn(32, 5)  # Example abiotic data tensor
+        >>> phyto_data = torch.randn(32, 1, 10)  # Example phytoplankton data tensor
+        >>> expected_concentrations = torch.randn(32, 1)  # Example expected concentrations tensor
+        >>> loss = model.loss((abio_data, phyto_data), expected_concentrations, metric="MAE")
+        >>> print(loss)
+        tensor(0.9166, grad_fn=<L1LossBackward>)
         """
 
         abio_data, phyto_data = input_data
 
-        raise(NotImplementedError)
+        # Predicting phytoplankton concentrations
+        predicted_concentrations = self.forward(abio_data, phyto_data)
+
+        # calculating the loss based on the chosen metric
+        if metric == "MSE":
+            loss = F.mse_loss(predicted_concentrations, expected_concentrations)
+        elif metric == "MAE":
+            loss = F.l1_loss(predicted_concentrations, expected_concentrations)
+        elif metric == "Huber":
+            loss = F.smooth_l1_loss(predicted_concentrations, expected_concentrations)
+        elif metric == "CosSim":
+            loss = F.cosine_similarity(predicted_concentrations, expected_concentrations)
+        else:
+
+            # just defaulting to MSE if a specified loss metric is not supported
+            print(f'Loss metric {metric} was not found, please choose one from ["MSE", "MAE", "Huber", "CosSim"]')
+            print('Defaulted to "MSE"')
+            loss = F.mse_loss(predicted_concentrations, expected_concentrations)
+
+        return loss
 
 
     def _predict_logits(self, abio_input, phyto_input):
@@ -124,7 +172,7 @@ class PhytoPredictor(nn.Module):
         return logits_output
 
 
-def predict(model, data, calc_loss=False):
+def predict(model, data, loss_metric="MSE", calc_loss=False):
     """
     Predicts phytoplankton concentrations using the provided neural network model and optionally calculates the loss.
 
@@ -173,7 +221,7 @@ def predict(model, data, calc_loss=False):
 
             # if we want to calculate the loss and keep track of it, we do the following
             if calc_loss:
-                loss = model.loss((abio_data, phyto_data), actual_concentrations)
+                loss = model.loss((abio_data, phyto_data), actual_concentrations, loss_metric)
                 all_losses.append(loss)
 
     # if we keep track of the loss, we return the average loss along with our concentrations
@@ -188,6 +236,7 @@ def train_neural_model(
     optimiser,
     data,
     trial_name,
+    loss_metric="MSE",
     epochs=5, 
     check_every=10):
     """
@@ -235,6 +284,7 @@ def train_neural_model(
     # we do a first pass of the evaluation set and calculate the current loss (as a base thingy)
     _, eval_loss = model.predict(
         evaluation_split,
+        loss_metric,
         calc_loss=True
     )
 
@@ -260,7 +310,7 @@ def train_neural_model(
                 optimiser.zero_grad()
 
                 # calculate loss
-                loss = model.loss((abio_data, phyto_data), actual_concentrations)
+                loss = model.loss((abio_data, phyto_data), actual_concentrations, loss_metric)
                 
                 # backpropogate through the model
                 loss.backward()
@@ -283,6 +333,7 @@ def train_neural_model(
                     # we do a first pass of the evaluation set and calculate the current loss (as a base thingy)
                     _, eval_loss = model.predict(
                         evaluation_split,
+                        loss_metric,
                         calc_loss=True
                     )
 
@@ -298,6 +349,7 @@ def train_neural_model(
     # once we are done with training we evaluate one last time
     _, eval_loss = model.predict(
         evaluation_split,
+        loss_metric,
         calc_loss=True
     )
 
