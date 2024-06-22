@@ -171,7 +171,7 @@ class PhytoPredictor(nn.Module):
         return logits_output
 
 
-def predict(model, data, loss_metric="MSE", calc_loss=False):
+def predict(model, data, loss_metric="MSE", calc_loss=False, calc_percentage_error=False):
     """
     Predicts phytoplankton concentrations using the provided neural network model and optionally calculates the loss.
 
@@ -182,20 +182,21 @@ def predict(model, data, loss_metric="MSE", calc_loss=False):
         - phyto_data (np.ndarray): Phytoplankton history matrix for a sample.
         - actual_concentrations (np.ndarray): Actual phytoplankton concentrations for a sample.
     calc_loss (bool, optional): Whether to calculate and return the average loss along with predictions. Defaults to False.
+    calc_percentage_error (bool, optional): Whether to calculate and return the percentage error. Defaults to False.
 
     Returns:
-    tuple or np.ndarray: Depending on calc_loss parameter:
+    list: Depending on calc_loss and calc_percentage_error parameters:
+        - Always returns the predicted concentrations.
         - If calc_loss=True: Returns a tuple (concentrations, average_loss), where:
             - concentrations (np.ndarray): Predicted phytoplankton concentrations.
             - average_loss (float): Average loss computed over all samples in data.
-        - If calc_loss=False: Returns concentrations (np.ndarray) containing only predicted phytoplankton concentrations.
+        - If calc_percentage_error=True: Returns a tuple (concentrations, average_percentage_error), where:
+            - concentrations (np.ndarray): Predicted phytoplankton concentrations.
+            - average_percentage_error (float): Average percentage error computed over all samples in data.
 
     Notes:
     - The function sets the model to evaluation mode (eval()) to disable dropout and batch normalization.
     - It iterates over the input data to predict phytoplankton concentrations using model.forward().
-    - If calc_loss=True, it calculates the loss between predicted concentrations and actual concentrations using model.loss().
-    - If calc_loss=True, it returns both predicted concentrations and the average loss across all samples.
-    - If calc_loss=False, it returns only the predicted concentrations.
 
     Example:
     >>> model = MyNeuralNetwork()
@@ -209,6 +210,7 @@ def predict(model, data, loss_metric="MSE", calc_loss=False):
     model.eval()
 
     all_losses = []
+    all_percentage_errors = []
     # since we are not training wd can trun off the gradient tracking
     with torch.no_grad():
 
@@ -222,12 +224,19 @@ def predict(model, data, loss_metric="MSE", calc_loss=False):
             if calc_loss:
                 loss = model.loss((abio_data, phyto_data), actual_concentrations, loss_metric)
                 all_losses.append(loss)
+            if calc_percentage_error:
+                percentage_error = (abs(actual_concentrations - concentrations) / actual_concentrations) * 100
+                all_percentage_errors.append(percentage_error)
+
+    output = [concentrations]
 
     # if we keep track of the loss, we return the average loss along with our concentrations
     if calc_loss:
-        return concentrations, np.sum(all_losses) / len(data)
+        output.append(np.sum(all_losses) / len(data))
+    if calc_percentage_error:
+        output.append(np.sum(all_percentage_errors) / len(all_percentage_errors))
 
-    return concentrations
+    return output
 
 
 def train_phytopredictor(
@@ -271,6 +280,7 @@ def train_phytopredictor(
         - model (object): The trained neural network model.
         - training_loss_log (list): List of training losses recorded during training.
         - evaluation_loss_log (list): List of evaluation losses recorded during training.
+        - percentage_error_log (list): List of calculated percentage errors recorded during training.
 
     Notes:
     - The function splits the input data into training and evaluation sets using the data_splitter function.
@@ -279,7 +289,6 @@ def train_phytopredictor(
     - Saves the best model checkpoint (lowest evaluation loss) periodically based on check_every parameter.
     - After training, evaluates the model one last time on the evaluation set and records the final evaluation loss.
     - Training progress is visualized using a tqdm progress bar.
-    - The trained model, training loss log, and evaluation loss log are returned as outputs.
 
     Example:
     >>> model = MyNeuralNetwork()
@@ -288,6 +297,8 @@ def train_phytopredictor(
     >>> trial_name = "trial_1"
     >>> trained_model, train_losses, eval_losses = train_neural_model(model, optimiser, data, trial_name, epochs=10)
     """
+
+    print(model)
 
     # checking whether the directory for the optimal model parameters exists
     if not os.path.exists("models"):
@@ -301,17 +312,20 @@ def train_phytopredictor(
     # initializing the logs for the loss of both the training and evaluation set
     training_loss_log = []
     evaluation_loss_log = []
+    percentage_error_log = []
 
     # we do a first pass of the evaluation set and calculate the current loss (as a base thingy)
-    _, eval_loss = predict(
+    _, eval_loss, percentage_error = predict(
         model,
         evaluation_split,
         loss_metric,
-        calc_loss=True
+        calc_loss=True,
+        calc_percentage_error=True
     )
 
     # and record the loss ofcourse
     evaluation_loss_log.append(eval_loss)
+    percentage_error_log.append(percentage_error)
 
     best_devloss = eval_loss
 
@@ -353,15 +367,17 @@ def train_phytopredictor(
                 if step % check_interval == 0: 
 
                     # we do a first pass of the evaluation set and calculate the current loss (as a base thingy)
-                    _, eval_loss = predict(
+                    _, eval_loss, percentage_error = predict(
                         model,
                         evaluation_split,
                         loss_metric,
-                        calc_loss=True
+                        calc_loss=True,
+                        calc_percentage_error=True
                     )
 
                     # and record the loss ofcourse
                     evaluation_loss_log.append(eval_loss)
+                    percentage_error_log.append(percentage_error)
 
                     if eval_loss <= best_devloss:
                         torch.save(model.state_dict(), f"models/{trial_name}.pt")
@@ -370,17 +386,18 @@ def train_phytopredictor(
                 step += 1
 
     # once we are done with training we evaluate one last time
-    _, eval_loss = predict(
+    _, eval_loss, percentage_error = predict(
         model,
         evaluation_split,
         loss_metric,
-        calc_loss=True
+        calc_loss=True,
+        calc_percentage_error=True
     )
 
     # and record the loss ofcourse
     evaluation_loss_log.append(eval_loss)
 
-    return model, training_loss_log, evaluation_loss_log
+    return model, training_loss_log, evaluation_loss_log, percentage_error_log
 
 
 def data_splitter(data, abio_columns, phyto_columns, shuffled_rows=True, random_seed=None, train_ratio=0.7, minimum_lookback=10, lookback=-1):
