@@ -171,7 +171,7 @@ class PhytoPredictor(nn.Module):
         return logits_output
 
 
-def predict(model, data, loss_metric="MSE", calc_loss=False, calc_percentage_error=False):
+def predict(model, data, device=torch.device('cpu'), loss_metric="MSE", calc_loss=False, calc_percentage_error=False):
     """
     Predicts phytoplankton concentrations using the provided neural network model and optionally calculates the loss.
 
@@ -181,6 +181,7 @@ def predict(model, data, loss_metric="MSE", calc_loss=False, calc_percentage_err
         - abio_data (np.ndarray): Abiotic data array for a sample.
         - phyto_data (np.ndarray): Phytoplankton history matrix for a sample.
         - actual_concentrations (np.ndarray): Actual phytoplankton concentrations for a sample.
+    device (torch.device, optional): The device on which to train the model, such as 'cpu' or 'cuda'. Defaults to 'cpu'.
     calc_loss (bool, optional): Whether to calculate and return the average loss along with predictions. Defaults to False.
     calc_percentage_error (bool, optional): Whether to calculate and return the percentage error. Defaults to False.
 
@@ -216,6 +217,8 @@ def predict(model, data, loss_metric="MSE", calc_loss=False, calc_percentage_err
 
         # iterate over our data
         for (abio_data, phyto_data), actual_concentrations in data:
+
+            abio_data, phyto_data, actual_concentrations = abio_data.to(device), phyto_data.to(device), actual_concentrations.to(device)
             
             # predicting the phytoplankton concentrations
             concentrations = model.forward(abio_data, phyto_data)
@@ -252,8 +255,10 @@ def train_phytopredictor(
     minimum_lookback=10,
     lookback=-1,
     loss_metric="MSE",
+    device=torch.device('cpu'),
     epochs=5, 
-    check_interval=10):
+    check_interval=10,
+    no_print=False):
     """
     Trains a neural network model using the specified optimizer on the provided data, monitoring training progress
     and saving the best model based on evaluation loss.
@@ -272,8 +277,10 @@ def train_phytopredictor(
     lookback (int, optional): Number of previous time steps to consider in the phytoplankton data for LSTM. Defaults to -1 (all).
     loss_metric (str, optional): The loss metric used for optimization. Defaults to "MSE".
                                  Supported metrics: "MSE", "MAE", "Huber", "CosSim".
+    device (torch.device, optional): The device on which to train the model, such as 'cpu' or 'cuda'. Defaults to 'cpu'.
     epochs (int, optional): Number of epochs (iterations over the entire dataset) for training. Defaults to 5.
     check_every (int, optional): Frequency of evaluation checks (in number of steps) to save the best model based on evaluation loss. Defaults to 10.
+    no_print (bool, optional): Boolean setting whether or not the function should print anything to standard out. Defaults to False.
 
     Returns:
     tuple: A tuple containing:
@@ -298,7 +305,10 @@ def train_phytopredictor(
     >>> trained_model, train_losses, eval_losses = train_neural_model(model, optimiser, data, trial_name, epochs=10)
     """
 
-    print(model)
+    model = model.to(device)
+    
+    if not no_print:
+        print(model)
 
     # checking whether the directory for the optimal model parameters exists
     if not os.path.exists("models"):
@@ -318,6 +328,7 @@ def train_phytopredictor(
     _, eval_loss, percentage_error = predict(
         model,
         evaluation_split,
+        device,
         loss_metric,
         calc_loss=True,
         calc_percentage_error=True
@@ -337,6 +348,8 @@ def train_phytopredictor(
     with tqdm(range(total_steps)) as bar:        
         for epoch in range(epochs):
             for (abio_data, phyto_data), actual_concentrations in training_split:
+
+                abio_data, phyto_data, actual_concentrations = abio_data.to(device), phyto_data.to(device), actual_concentrations.to(device)
 
                 #[-----------------------Start Training Loop----------------------------]
                 # setting the mode to "training" so we use dropout etc
@@ -370,6 +383,7 @@ def train_phytopredictor(
                     _, eval_loss, percentage_error = predict(
                         model,
                         evaluation_split,
+                        device,
                         loss_metric,
                         calc_loss=True,
                         calc_percentage_error=True
@@ -389,6 +403,7 @@ def train_phytopredictor(
     _, eval_loss, percentage_error = predict(
         model,
         evaluation_split,
+        device,
         loss_metric,
         calc_loss=True,
         calc_percentage_error=True
