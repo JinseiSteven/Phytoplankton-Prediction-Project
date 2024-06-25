@@ -580,6 +580,27 @@ def aggregate_phyto_data(data, clustered_phyto_types, keep_original_columns=Fals
 
     return data.drop(phyto_columns, axis=1), labels
 
+def extrapolate(model, abiotic_data, phytoplankton_history, device):
+    model = model.to(device)
+
+    phytoplankton_history_np = phytoplankton_history.to_numpy()
+
+    predictions = []
+    for index, row in abiotic_data.iterrows():
+        print(f"Extrapolating... ({index}/{len(abiotic_data)})")
+
+        # we fill the "actual concentrations" part with none since it will not be needed here
+        input_data = ((torch.tensor(row.to_numpy(), dtype=torch.float32), torch.tensor(phytoplankton_history_np, dtype=torch.float32)), torch.tensor([0]))
+
+        # make a prediction of the following concentrations
+        prediction = predict(model, [input_data], device=device)
+
+        predictions.append(prediction)
+        phytoplankton_history_np = np.vstack((phytoplankton_history_np, prediction))
+    
+    return np.squeeze(np.asarray(predictions))
+
+
 
 if __name__ == "__main__":
     pass
