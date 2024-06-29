@@ -18,7 +18,8 @@ class PhytoPredictor(nn.Module):
     input_size_abio (int): Input size for abiotic data.
     ffnn_hidden_size (int): Hidden size of the feedforward neural network (FFNN) layer.
     output_size (int): Output size, number of classes or predicted values.
-    p_drop (float): Dropout probability for regularization.
+    dual_layer (bool, optional): Whether to use a single linear layer or two linear layers. Defaults to False.
+    p_drop (float, optional): Dropout probability for regularization. Defaults to 0.5.
     bidirectional (bool, optional): Whether the LSTM is bidirectional. Defaults to True.
 
     Methods:
@@ -41,7 +42,7 @@ class PhytoPredictor(nn.Module):
     torch.Size([1, 1])  # Example output shape, depends on output_size
     """
 
-    def __init__(self, input_size_phyto, lstm_hidden_size, input_size_abio, ffnn_hidden_size, output_size, p_drop=0.5, bidirectional=True):
+    def __init__(self, input_size_phyto, lstm_hidden_size, input_size_abio, ffnn_hidden_size, output_size, dual_layer=False, p_drop=0.5, bidirectional=True):
         super(PhytoPredictor, self).__init__()
 
         # setting up the (Bi)LSTM for the phytoplankton data, input size will probably be the same as the hidden size
@@ -50,12 +51,6 @@ class PhytoPredictor(nn.Module):
             hidden_size=lstm_hidden_size,
             bidirectional=bidirectional,
         )
-
-        self.simple_history_encoder = nn.RNN(
-            input_size=input_size_phyto,
-            hidden_size=lstm_hidden_size,
-            nonlinearity="tanh"
-        )
         
         # the (Bi)LSTM will have concatenated the forward and backward pass parameters
         if bidirectional:
@@ -63,11 +58,20 @@ class PhytoPredictor(nn.Module):
         else:
             ffnn_input_size = lstm_hidden_size + input_size_abio
 
-        # lastly we use a two layer FFNN to predict the concentrations
-        self.FFNN = nn.Sequential(
-            nn.Dropout(p_drop),
-            nn.Linear(ffnn_input_size, output_size)
-        )
+        # lastly we use a FFNN to predict the concentrations
+        if dual_layer:
+            self.FFNN = nn.Sequential(
+                nn.Dropout(p_drop),
+                nn.Linear(ffnn_input_size, ffnn_hidden_size),
+                nn.ReLU(),
+                nn.Dropout(p_drop),
+                nn.Linear(ffnn_hidden_size, output_size)
+            )
+        else:
+            self.FFNN = nn.Sequential(
+                nn.Dropout(p_drop),
+                nn.Linear(ffnn_input_size, ffnn_hidden_size)
+            )
 
     def forward(self, abio_data, phyto_input):
         """
@@ -106,7 +110,9 @@ class PhytoPredictor(nn.Module):
                                     - "Huber": Huber Loss.
 
         Returns:
-        torch.Tensor: Computed loss tensor based on the selected metric.
+            - torch.Tensor: Computed loss tensor based on the selected metric.
+            - torch.Tensor: Predicted phytoplankton concentrations tensor of shape (batch_size, output_size).
+
 
         Notes:
         - The method uses the neural network to predict phytoplankton concentrations and calculates the loss based on the chosen metric.
@@ -365,6 +371,7 @@ def train_phytopredictor(
                 # calculate loss
                 loss, predicted_concentrations = model.loss((abio_data, phyto_data), actual_concentrations, loss_metric)
 
+                # recording the predictions and target values for plotting
                 predictions.append(predicted_concentrations.detach().numpy())
                 real_values.append(actual_concentrations.detach().numpy())
                 
@@ -493,7 +500,6 @@ def data_splitter(data, abio_columns, phyto_columns, shuffled_rows=True, random_
 
             # first grabbing the abiotic data and the actual phytoplankton concentrations at the timestamp and location
             abio_data = torch.tensor(data.loc[index, abio_columns].to_numpy(), dtype=torch.float32)
-
             phyto_concentration = torch.tensor(data.loc[index, phyto_columns].to_numpy(), dtype=torch.float32)
 
             # if no lookback has been decided, the lstm will use all previous data
@@ -589,6 +595,26 @@ def aggregate_phyto_data(data, clustered_phyto_types, keep_original_columns=Fals
     return data.drop(phyto_columns, axis=1), labels
 
 def extrapolate(model, abiotic_data, phytoplankton_history, device):
+    """
+    Extrapolates future phytoplankton concentrations based on abiotic data and historical phytoplankton data using a given model.
+
+    Parameters:
+    model (torch.nn.Module): The machine learning model used for making predictions. This model should be compatible with the PyTorch framework.
+    abiotic_data (pd.DataFrame): A DataFrame containing the abiotic data (e.g., temperature, salinity) used as input features for the model.
+    phytoplankton_history (pd.DataFrame): A DataFrame containing the historical phytoplankton concentration data used as input features for the model.
+    device (torch.device): The device (CPU or GPU) on which the model and tensors should be processed.
+
+    Returns:
+    tuple: A tuple containing two numpy arrays:
+        - predictions (np.ndarray): An array of predicted phytoplankton concentrations.
+        - test (np.ndarray): An empty array (currently not utilized within the function).
+    
+    Notes:
+    - The model is transferred to the specified device before making predictions.
+    - Predictions are generated in a loop over each row of the abiotic_data.
+    - The historical phytoplankton data is updated with each prediction to provide sequential forecasting.
+    - The function uses torch.no_grad() to disable gradient calculation, improving memory efficiency during inference.
+    """
     model = model.to(device)
 
     phytoplankton_history_np = phytoplankton_history.to_numpy()
