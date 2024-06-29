@@ -1,4 +1,4 @@
-# Coupling Abiotic and Biotic datasets
+# Coupling Abiotic and Biotic datasets - jam.rs
 
 Machine learning and data analysis project with the main goal being to couple abiotic, phytoplankton and irradiance datasets, after which analysis and prediction of phytoplankton concentration can be done. This is a project conducted by students from the University of Amsterdam.
 
